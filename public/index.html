@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Web Witness — verifiable web observations</title>
+<style>
+  :root { --bg:#0b0f14; --panel:#121821; --line:#1f2937; --text:#e5e7eb; --dim:#9ca3af; --accent:#5eead4; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 ui-sans-serif,system-ui,"Segoe UI",sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:40px 20px 80px; }
+  h1 { font-size:26px; margin:0 0 6px; }
+  h1 span { color:var(--accent); }
+  p.sub { color:var(--dim); margin:0 0 28px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:20px; }
+  label { display:block; font-size:13px; color:var(--dim); margin:12px 0 4px; text-transform:uppercase; letter-spacing:.06em; }
+  input[type=text], select { width:100%; background:#0d1420; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:10px 12px; font:14px ui-monospace,Consolas,monospace; }
+  input:focus, select:focus { outline:1px solid var(--accent); }
+  .row { display:flex; gap:12px; } .row > div { flex:1; }
+  button { background:var(--accent); color:#04211b; border:0; border-radius:8px; padding:11px 22px; font-weight:700; font-size:14px; cursor:pointer; margin-top:16px; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); margin-left:10px; }
+  pre { background:#0a0e14; border:1px solid var(--line); border-radius:8px; padding:14px; overflow:auto; font-size:12.5px; max-height:420px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:99px; font-size:12px; font-weight:700; }
+  .ok { background:#064e3b; color:var(--ok); } .warn { background:#451a03; color:var(--warn); } .bad { background:#450a0a; color:var(--bad); }
+  .examples { font-size:12.5px; color:var(--dim); margin-top:10px; }
+  .examples code { background:#0d1420; padding:1px 6px; border-radius:4px; cursor:pointer; }
+  a { color:var(--accent); }
+  .hidden { display:none; }
+  h2 { font-size:16px; margin:0 0 10px; }
+  .note { color:var(--dim); font-size:13px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Web <span>Witness</span></h1>
+  <p class="sub">
+    An agent that observes web/API data, extracts a claim, signs it (Ed25519), and anchors its
+    SHA-256 commitment on <strong>zkVerify</strong> — so "what the agent saw" becomes independently
+    checkable, without archiving the full payload.
+  </p>
+
+  <div class="card">
+    <h2>Witness a URL</h2>
+    <label>Target URL (public http/https)</label>
+    <input type="text" id="url" placeholder="https://api.coinbase.com/v2/prices/BTC-USD/spot" />
+    <div class="row">
+      <div>
+        <label>Extraction mode</label>
+        <select id="mode">
+          <option value="jsonpath">JSON path</option>
+          <option value="regex">Regex</option>
+        </select>
+      </div>
+      <div id="specBox">
+        <label>Path</label>
+        <input type="text" id="spec" placeholder="data.amount" />
+      </div>
+      <div id="groupBox" class="hidden">
+        <label>Capture group</label>
+        <input type="text" id="group" value="0" />
+      </div>
+    </div>
+    <button id="go">Witness it</button>
+    <button class="ghost" id="verifyBtn" disabled>Verify latest claim</button>
+    <div class="examples">
+      Try: <code onclick="ex(this)">https://api.coinbase.com/v2/prices/BTC-USD/spot</code> +
+      <code onclick="ex(this)">data.amount</code> &nbsp;·&nbsp;
+      <code onclick="ex(this)">https://api.github.com/repos/zkVerify/zkverifyjs</code> +
+      <code onclick="ex(this)">stargazers_count</code>
+    </div>
+    <div class="note">Rate limited to a few requests per minute. Only public internet hosts — loopback/private ranges are rejected (SSRF guard).</div>
+  </div>
+
+  <div class="card hidden" id="result">
+    <h2>Claim document <span id="anchorBadge" class="badge warn"></span></h2>
+    <pre id="claimJson"></pre>
+    <div class="note">
+      Offline check: <span id="pubkeyShort" style="font-family:monospace"></span> is the agent's public key
+      (GET <a href="/publickey">/publickey</a>). The <code>commitment</code> hex is what gets anchored on-chain
+      as <code>webwitness/v1/&lt;commitment&gt;</code>.
+    </div>
+  </div>
+
+  <div class="card hidden" id="verifyCard">
+    <h2>Verification report</h2>
+    <pre id="verifyJson"></pre>
+  </div>
+</div>
+
+<script>
+  let lastClaim = null, pollTimer = null;
+  const $ = (id) => document.getElementById(id);
+
+  $('mode').onchange = () => {
+    const regex = $('mode').value === 'regex';
+    $('specBox').classList.toggle('hidden', regex);
+    $('groupBox').classList.toggle('hidden', !regex);
+    $('spec').placeholder = regex ? 'price.\\d+\\.\\d+' : 'data.amount';
+  };
+
+  function ex(el) {
+    const code = el.textContent;
+    if (code.startsWith('http')) $('url').value = code;
+    else { $('mode').value = 'jsonpath'; $('mode').onchange(); $('spec').value = code; }
+  }
+
+  async function fetchJson(u, opts) {
+    const r = await fetch(u, opts);
+    return { status: r.status, body: await r.json().catch(() => null) };
+  }
+
+  function badge(status) {
+    const el = $('anchorBadge');
+    el.className = 'badge ' + (status === 'finalized' ? 'ok' : status === 'disabled' || status === 'pending' || status === 'submitted' ? 'warn' : 'bad');
+    el.textContent = 'anchor: ' + status;
+  }
+
+  async function pollAnchor(id) {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      const { body } = await fetchJson('/claims/' + id);
+      if (!body) return;
+      badge(body.anchor.status);
+      $('claimJson').textContent = JSON.stringify(body, null, 2);
+      if (['finalized', 'failed', 'disabled'].includes(body.anchor.status)) clearInterval(pollTimer);
+    }, 5000);
+  }
+
+  $('go').onclick = async () => {
+    $('go').disabled = true;
+    $('result').classList.add('hidden');
+    $('verifyCard').classList.add('hidden');
+    try {
+      const payload = { url: $('url').value.trim(), mode: $('mode').value };
+      if (payload.mode === 'jsonpath') payload.path = $('spec').value.trim();
+      else { payload.regex = $('spec').value.trim(); payload.group = parseInt($('group').value || '0', 10); }
+      const { status, body } = await fetchJson('/witness', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      if (status !== 200) {
+        alert('Error ' + status + ': ' + (body?.error?.message ?? 'unknown'));
+        return;
+      }
+      lastClaim = body;
+      $('result').classList.remove('hidden');
+      $('verifyBtn').disabled = false;
+      $('claimJson').textContent = JSON.stringify(body, null, 2);
+      badge(body.anchor.status);
+      $('pubkeyShort').textContent = (await (await fetch('/publickey')).json()).public_key_hex.slice(0, 24) + '…';
+      pollAnchor(body.id);
+    } finally {
+      $('go').disabled = false;
+    }
+  };
+
+  $('verifyBtn').onclick = async () => {
+    if (!lastClaim) return;
+    $('verifyBtn').disabled = true;
+    try {
+      const { status, body } = await fetchJson('/claims/' + lastClaim.id + '/verify?refetch=1');
+      $('verifyCard').classList.remove('hidden');
+      $('verifyJson').textContent = JSON.stringify(status === 200 ? body : body?.error ?? body, null, 2);
+    } finally {
+      $('verifyBtn').disabled = false;
+    }
+  };
+</script>
+</body>
+</html>

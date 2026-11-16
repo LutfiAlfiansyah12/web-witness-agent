@@ -1,0 +1,28 @@
+# systemd unit — Web Witness agent sebagai service + auto-restart
+# Letakkan di VPS: /etc/systemd/system/web-witness.service
+# Ganti /root/web-witness sesuai lokasi project.
+
+[Unit]
+Description=Web Witness Agent (Agent Games Wildcard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/web-witness
+ExecStartPre=/usr/bin/mkdir -p /root/web-witness/data
+ExecStart=/usr/bin/node dist/src/main.js
+Restart=always
+RestartSec=3
+EnvironmentFile=/root/web-witness/.env
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Log ke journald — lihat dengan: journalctl -u web-witness -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
